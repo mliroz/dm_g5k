@@ -5,6 +5,18 @@ class Cluster(object):
 
     __metaclass__ = ABCMeta
 
+    # Cluster state
+    initialized = False
+    running = False
+
+    # General properties
+    base_dir = None
+    local_base_conf_dir = None
+
+    # Nodes
+    hosts = []
+    master = None
+
     @abstractmethod
     def initialize(self):
         pass

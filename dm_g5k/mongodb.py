@@ -5,7 +5,8 @@ import tempfile
 
 from ConfigParser import ConfigParser
 
-from execo.action import TaktukPut, Get, Remote, TaktukRemote
+from execo.action import TaktukPut, Get, Remote, TaktukRemote, \
+    SequentialActions
 from execo_engine import logger
 from execo_g5k.api_utils import get_host_cluster
 
@@ -24,10 +25,6 @@ DEFAULT_MONGODB_PORT = 5586
 
 DEFAULT_MONGODB_LOCAL_CONF_DIR = "conf"
 
-# Other constants
-# TODO: is there a way to obtain JAVA_HOME automatically?
-JAVA_HOME = "/usr/lib/jvm/java-7-openjdk-amd64"
-
 
 class MongoDBException(Exception):
     pass
@@ -40,11 +37,6 @@ class MongoDBNotInitializedException(MongoDBException):
 class MongoDBCluster(Cluster):
     """This class manages the whole life-cycle of a MongoDB cluster.
     """
-
-    # Cluster state
-    initialized = False
-    running = False
-    running_mongodb = False
 
     # Default properties
     defaults = {
@@ -75,14 +67,14 @@ class MongoDBCluster(Cluster):
         if config_file:
             config.readfp(open(config_file))
 
-        self.mongodb_base_dir = config.get("cluster", "mongodb_base_dir")
-        self.mongodb_data_dir = config.get("cluster", "mongodb_data_dir")
-        self.mongodb_conf_dir = config.get("cluster", "mongodb_conf_dir")
-        self.mongodb_logs_file = config.get("cluster", "mongodb_logs_file")
-        self.mongodb_port = config.getint("cluster", "mongodb_port")
+        self.base_dir = config.get("cluster", "mongodb_base_dir")
+        self.data_dir = config.get("cluster", "mongodb_data_dir")
+        self.conf_dir = config.get("cluster", "mongodb_conf_dir")
+        self.logs_file = config.get("cluster", "mongodb_logs_file")
+        self.port = config.getint("cluster", "mongodb_port")
         self.local_base_conf_dir = config.get("local", "local_base_conf_dir")
 
-        self.mongodb_bin_dir = self.mongodb_base_dir + "/bin"
+        self.bin_dir = self.base_dir + "/bin"
 
         # Configure nodes
         self.hosts = hosts
@@ -99,7 +91,7 @@ class MongoDBCluster(Cluster):
 
         logger.info("MongoDB cluster created with hosts " + str(self.hosts))
 
-    def bootstrap(self, mongodb_tar_file):
+    def bootstrap(self, tar_file):
         """Install MongoDB in all cluster nodes from the specified tgz file.
 
         Args:
@@ -107,42 +99,35 @@ class MongoDBCluster(Cluster):
             The file containing MongoDB binaries.
         """
 
-        # 1. Remove used dirs if existing
-        action = Remote("rm -rf " + self.mongodb_base_dir, self.hosts)
-        action.run()
-        action = Remote("rm -rf " + self.mongodb_data_dir, self.hosts)
-        action.run()
-        action = Remote("rm -rf " + self.mongodb_conf_dir, self.hosts)
-        action.run()
-        action = Remote("rm -f " + self.mongodb_logs_file, self.hosts)
-        action.run()
+        # 1. Copy hadoop tar file and uncompress
+        logger.info("Copy " + tar_file + " to hosts and uncompress")
+        rm_files = TaktukRemote("rm -rf " + self.base_dir +
+                                " " + self.conf_dir +
+                                " " + self.data_dir +
+                                " " + self.logs_file,
+                                self.hosts)
 
-        # 1. Copy MongoDB tar file and uncompress
-        logger.info("Copy " + mongodb_tar_file + " to hosts and uncompress")
-        action = TaktukPut(self.hosts, [mongodb_tar_file], "/tmp")
-        action.run()
-        action = Remote(
-            "tar xf /tmp/" + os.path.basename(mongodb_tar_file) + " -C /tmp",
-            self.hosts)
-        action.run()
+        put_tar = TaktukPut(self.hosts, [tar_file], "/tmp")
+        tar_xf = TaktukRemote("tar xf /tmp/" + os.path.basename(tar_file) +
+                              " -C /tmp", self.hosts)
+        SequentialActions([rm_files, put_tar, tar_xf]).run()
 
         # 2. Move installation to base dir
         logger.info("Create installation directories")
         action = Remote(
             "mv /tmp/" +
-            os.path.basename(mongodb_tar_file).replace(".tgz", "") + " " +
-            self.mongodb_base_dir,
+            os.path.basename(tar_file).replace(".tgz", "") + " " +
+            self.base_dir,
             self.hosts)
         action.run()
 
         # 3 Create other dirs
-        action = Remote("mkdir -p " + self.mongodb_data_dir, self.hosts)
-        action.run()
-
-        action = Remote("mkdir -p " + self.mongodb_conf_dir + ";"
-                        "touch " + os.path.join(self.mongodb_conf_dir, CONF_FILE),
-                        self.hosts)
-        action.run()
+        mkdirs = TaktukRemote("mkdir -p " + self.data_dir +
+                              " && mkdir -p " + self.conf_dir +
+                              " && touch " + os.path.join(self.conf_dir,
+                                                          CONF_FILE),
+                              self.hosts)
+        mkdirs.run()
 
     def initialize(self):
         """Initialize the cluster: copy base configuration."""
@@ -159,7 +144,7 @@ class MongoDBCluster(Cluster):
         for g5k_cluster in self.host_clusters:
             hosts = self.host_clusters[g5k_cluster]
             self._configure_servers(hosts)
-            self._copy_conf(self.conf_dir, hosts)
+            self._copy_conf(self.temp_conf_dir, hosts)
 
         self.initialized = True
 
@@ -178,12 +163,12 @@ class MongoDBCluster(Cluster):
     def _copy_base_conf(self):
         """Copy base configuration files to tmp dir."""
 
-        self.conf_dir = tempfile.mkdtemp("", "mongodb-", "/tmp")
+        self.temp_conf_dir = tempfile.mkdtemp("", "mongodb-", "/tmp")
         if os.path.exists(self.local_base_conf_dir):
             base_conf_files = [os.path.join(self.local_base_conf_dir, f)
                                for f in os.listdir(self.local_base_conf_dir)]
             for f in base_conf_files:
-                shutil.copy(f, self.conf_dir)
+                shutil.copy(f, self.temp_conf_dir)
         else:
             logger.warn(
                 "Local conf dir does not exist. Using default configuration")
@@ -200,10 +185,10 @@ class MongoDBCluster(Cluster):
         logger.info("Copying missing conf files from master: " + str(
             missing_conf_files))
 
-        remote_missing_files = [os.path.join(self.mongodb_conf_dir, f)
+        remote_missing_files = [os.path.join(self.conf_dir, f)
                                 for f in missing_conf_files]
 
-        action = Get([self.master], remote_missing_files, self.conf_dir)
+        action = Get([self.master], remote_missing_files, self.temp_conf_dir)
         action.run()
 
     def _create_master_and_slave_conf(self):
@@ -230,7 +215,7 @@ class MongoDBCluster(Cluster):
 
         conf_files = [os.path.join(conf_dir, f) for f in os.listdir(conf_dir)]
 
-        action = TaktukPut(hosts, conf_files, self.mongodb_conf_dir)
+        action = TaktukPut(hosts, conf_files, self.conf_dir)
         action.run()
 
         if not action.finished_ok:
@@ -244,24 +229,23 @@ class MongoDBCluster(Cluster):
 
         logger.info("Starting MongoDB")
 
-        if self.running_mongodb:
+        if self.running:
             logger.warn("MongoDB was already started")
             return
 
-        proc = TaktukRemote(self.mongodb_bin_dir + "/mongod "
+        proc = TaktukRemote(self.bin_dir + "/mongod "
                             "--fork "
-                            "--dbpath " + self.mongodb_data_dir + " "
-                            "--port " + str(self.mongodb_port) + " "
-                            "--config " + os.path.join(self.mongodb_conf_dir,
+                            "--dbpath " + self.data_dir + " "
+                            "--port " + str(self.port) + " "
+                            "--config " + os.path.join(self.conf_dir,
                                                        CONF_FILE) + " "
-                            "--logpath " + self.mongodb_logs_file,
+                            "--logpath " + self.logs_file,
                             self.hosts)
         proc.run()
 
         if not proc.finished_ok:
             logger.warn("Error while starting MongoDB")
         else:
-            self.running_mongodb = True
             self.running = True
 
     def start_shell(self, node=None):
@@ -279,7 +263,7 @@ class MongoDBCluster(Cluster):
             node = self.master
 
         call("ssh -t " + node.address + " " +
-             self.mongodb_bin_dir + "/mongo --port " + str(self.mongodb_port),
+             self.bin_dir + "/mongo --port " + str(self.port),
              shell=True)
 
     def stop(self):
@@ -287,13 +271,12 @@ class MongoDBCluster(Cluster):
 
         logger.info("Stopping MongoDB")
 
-        proc = TaktukRemote(self.mongodb_bin_dir + "/mongod "
+        proc = TaktukRemote(self.bin_dir + "/mongod "
                             "--shutdown "
-                            "--dbpath " + self.mongodb_data_dir,
+                            "--dbpath " + self.data_dir,
                             self.hosts)
         proc.run()
 
-        self.running_mongodb = False
         self.running = False
 
     def clean_logs(self):
@@ -307,7 +290,7 @@ class MongoDBCluster(Cluster):
             self.stop()
             restart = True
 
-        action = Remote("rm -f " + self.mongodb_logs_file, self.hosts)
+        action = Remote("rm -f " + self.logs_file, self.hosts)
         action.run()
 
         if restart:
@@ -327,7 +310,7 @@ class MongoDBCluster(Cluster):
             self.stop()
             restart = True
 
-        action = Remote("rm -rf " + self.mongodb_data_dir, self.hosts)
+        action = Remote("rm -rf " + self.data_dir, self.hosts)
         action.run()
 
         if restart:

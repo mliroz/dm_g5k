@@ -1,8 +1,6 @@
 import getpass
 import os
 import pickle
-import re
-import tempfile
 
 from execo.action import Remote
 from execo.host import Host
@@ -12,8 +10,6 @@ from execo_g5k import get_oar_job_nodes, get_oargrid_job_nodes
 
 
 # Imports #####################################################################
-import shutil
-
 
 def import_class(name):
     """Dynamically load a class and return a reference to it.
