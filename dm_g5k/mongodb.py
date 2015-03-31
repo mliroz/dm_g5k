@@ -1,9 +1,11 @@
 import os
+import yaml
 import shutil
 from subprocess import call
 import tempfile
 
 from ConfigParser import ConfigParser
+from yaml import CLoader as Loader, CDumper as Dumper
 
 from execo.action import TaktukPut, Get, Remote, TaktukRemote, \
     SequentialActions
@@ -21,17 +23,9 @@ DEFAULT_MONGODB_DATA_DIR = DEFAULT_MONGODB_BASE_DIR + "/data"
 DEFAULT_MONGODB_CONF_DIR = DEFAULT_MONGODB_BASE_DIR + "/conf"
 DEFAULT_MONGODB_LOGS_FILE = DEFAULT_MONGODB_BASE_DIR + "/mongodb.log"
 
-DEFAULT_MONGODB_PORT = 5586
+DEFAULT_MONGODB_PORT = 27017
 
 DEFAULT_MONGODB_LOCAL_CONF_DIR = "conf"
-
-
-class MongoDBException(Exception):
-    pass
-
-
-class MongoDBNotInitializedException(MongoDBException):
-    pass
 
 
 class MongoDBCluster(Cluster):
@@ -80,6 +74,8 @@ class MongoDBCluster(Cluster):
         self.hosts = hosts
         self.master = hosts[0]
 
+        self.do_replication = len(self.hosts) > 1
+
         # Store cluster information
         self.host_clusters = {}
         for h in self.hosts:
@@ -89,13 +85,15 @@ class MongoDBCluster(Cluster):
             else:
                 self.host_clusters[g5k_cluster] = [h]
 
-        logger.info("MongoDB cluster created with hosts " + str(self.hosts))
+        logger.info("MongoDB cluster created with master " + str(self.master) +
+                    " and hosts " + str(self.hosts) +
+                    (" with replication" if self.do_replication else ""))
 
     def bootstrap(self, tar_file):
         """Install MongoDB in all cluster nodes from the specified tgz file.
 
         Args:
-          mongodb_tar_file (str):
+          tar_file (str):
             The file containing MongoDB binaries.
         """
 
@@ -193,17 +191,40 @@ class MongoDBCluster(Cluster):
 
     def _create_master_and_slave_conf(self):
         """Create master and slaves configuration files."""
-        pass
 
-    def _check_initialization(self):
-        """ Check whether the cluster is initialized and raise and exception if
-        not.
-        """
+        # Load configuration
+        conf_file = os.path.join(self.temp_conf_dir, CONF_FILE)
+        with open(conf_file) as conf_stream:
+            config = yaml.load(conf_stream, Loader=Loader)
+            if not config:
+                config = {}
 
-        if not self.initialized:
-            logger.error("The cluster should be initialized")
-            raise MongoDBNotInitializedException(
-                "The cluster should be initialized")
+        # General configuration
+        if "systemLog" not in config:
+            config["systemLog"] = {}
+        config["systemLog"]["destination"] = "file"
+        config["systemLog"]["path"] = self.logs_file
+
+        if "net" not in config:
+            config["net"] = {}
+        config["net"]["port"] = str(self.port)
+
+        if "storage" not in config:
+            config["storage"] = {}
+        config["storage"]["dbPath"] = self.data_dir
+
+        # Replication
+        if self.do_replication:
+            self.rs_name = "mdb_" + str(self.master.address)
+            if "replication" not in config:
+                config["replication"] = {}
+            rep_config = config["replication"]
+
+            rep_config["replSetName"] = self.rs_name
+
+        # Write back configuration
+        with open(conf_file, "w") as conf_stream:
+            conf_stream.write(yaml.dump(config, Dumper=Dumper))
 
     def _configure_servers(self, hosts=None):
         pass
@@ -224,6 +245,7 @@ class MongoDBCluster(Cluster):
                 action.kill()
 
     def start(self):
+        """Start MongoDB server."""
 
         self._check_initialization()
 
@@ -233,20 +255,35 @@ class MongoDBCluster(Cluster):
             logger.warn("MongoDB was already started")
             return
 
+        # Start nodes
         proc = TaktukRemote(self.bin_dir + "/mongod "
                             "--fork "
-                            "--dbpath " + self.data_dir + " "
-                            "--port " + str(self.port) + " "
                             "--config " + os.path.join(self.conf_dir,
-                                                       CONF_FILE) + " "
-                            "--logpath " + self.logs_file,
+                                                       CONF_FILE) + " ",
                             self.hosts)
         proc.run()
 
         if not proc.finished_ok:
             logger.warn("Error while starting MongoDB")
+            return
         else:
             self.running = True
+
+        # Start replication
+        logger.info("Configuring replication")
+        if self.do_replication:
+            mongo_command = "rs.initiate();"
+            mongo_command += ';'.join(
+                'rs.add("' + h.address + ':'+ str(self.port) + '")'
+                for h in self.hosts)
+
+            proc = TaktukRemote(self.bin_dir + "/mongo "
+                                               "--eval '" + mongo_command + "'",
+                                [self.master])
+            proc.run()
+
+            if not proc.finished_ok:
+                logger.warn("Not able to start replication")
 
     def start_shell(self, node=None):
         """Open a MongoDB shell.
@@ -267,6 +304,8 @@ class MongoDBCluster(Cluster):
              shell=True)
 
     def stop(self):
+        """Stop MongoDB server."""
+
         self._check_initialization()
 
         logger.info("Stopping MongoDB")
@@ -310,7 +349,7 @@ class MongoDBCluster(Cluster):
             self.stop()
             restart = True
 
-        action = Remote("rm -rf " + self.data_dir, self.hosts)
+        action = Remote("rm -rf " + self.data_dir + "/*", self.hosts)
         action.run()
 
         if restart:
