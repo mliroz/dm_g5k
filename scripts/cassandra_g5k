@@ -1,0 +1,227 @@
+#!/usr/bin/env python
+from argparse import ArgumentParser, RawTextHelpFormatter
+import os
+from execo import Host
+from execo.log import style, logger
+import sys
+from dm_g5k.cassandra import CassandraCluster
+from dm_g5k.serialization import cluster_exists, get_default_id, \
+    generate_new_id, deserialize_cluster, remove_cluster, serialize_cluster
+from dm_g5k.util import generate_hosts
+
+if __name__ == "__main__":
+
+    prog = "cassandra_g5k"
+    description = "This tool helps you to manage a Cassandra cluster in Grid5000."
+    parser = ArgumentParser(prog=prog,
+                            description=description,
+                            formatter_class=RawTextHelpFormatter,
+                            add_help=False)
+
+    actions = parser.add_argument_group(style.host("General options"),
+                                        "Options to be used generally "
+                                        "with Hadoop actions.")
+
+    actions.add_argument("-h", "--help",
+                         action="help",
+                         help="Show this help message and exit")
+
+    actions.add_argument("--id",
+                         action="store",
+                         nargs=1,
+                         metavar="ID",
+                         help="The identifier of the cluster. If not indicated"
+                                ", last used cluster will be used (if any)")
+
+    verbose_group = actions.add_mutually_exclusive_group()
+
+    verbose_group.add_argument("-v", "--verbose",
+                               dest="verbose",
+                               action="store_true",
+                               help="Run in verbose mode")
+
+    verbose_group.add_argument("-q", "--quiet",
+                               dest="quiet",
+                               action="store_true",
+                               help="Run in quiet mode")
+
+    object_group = parser.add_argument_group(style.host("Object management "
+                                                        "options"),
+                                             "Options to create and destroy "
+                                             "hadoop cluster objects.")
+
+    object_mutex_group = object_group.add_mutually_exclusive_group()
+
+    object_mutex_group.add_argument("--create",
+                                    metavar="MACHINELIST",
+                                    nargs=1,
+                                    action="store",
+                                    help="Create the cluster object with the "
+                                    "nodes in MACHINELIST file")
+
+    object_mutex_group.add_argument("--delete",
+                                    dest="delete",
+                                    action="store_true",
+                                    help="Remove all files used by the cluster")
+
+    object_group.add_argument("--properties",
+                              dest="properties",
+                              nargs=1,
+                              action="store",
+                              help="File containing the properties to be used "
+                              "(INI file). Applies only to --create")
+
+    object_group.add_argument("--bootstrap",
+                              metavar="CASSANDRA_TAR",
+                              nargs=1,
+                              action="store",
+                              help="Install Cassandra in the cluster nodes taking"
+                                   " into account the specified properties.\n"
+                                   "CASSANDRA_TAR defines the path of the .tar.gz"
+                                   " file containing Cassandra binaries.")
+
+    actions = parser.add_argument_group(style.host("Cassandra actions"),
+                                        "Actions to execute in the Cassandra "
+                                        "cluster. Several options can be "
+                                        "indicated at the same time.\n"
+                                        "The order of execution is fixed no "
+                                        "matter the order used in the "
+                                        "arguments: it follows the order\n"
+                                        "of the options.")
+
+    actions.add_argument("--initialize",
+                         dest="initialize",
+                         action="store_true",
+                         help="Initialize cluster: Copy configuration and "
+                         "format dfs")
+
+    actions.add_argument("--start",
+                         dest="start",
+                         action="store_true",
+                         help="Start the NameNode and JobTracker")
+
+    exec_group = actions.add_mutually_exclusive_group()
+
+    exec_group.add_argument("--shell",
+                            action="store_true",
+                            help="Start a shell session in Cassandra")
+
+    actions.add_argument("--stop",
+                         dest="stop",
+                         action="store_true",
+                         help="Stop the NameNode and JobTracker")
+
+    actions.add_argument("--clean",
+                         dest="clean",
+                         action="store_true",
+                         help="Remove Hadoop logs and clean the dfs")
+
+    exec_opts = parser.add_argument_group(style.host("Execution options"),
+                                          "Parameters for the execution of "
+                                          "jobs. Apply only to --job, and "
+                                          "--shell")
+
+    exec_opts.add_argument("--node",
+                           action="store",
+                           nargs=1,
+                           metavar="NODE",
+                           help="Node where the action will be executed")
+
+    exec_opts.add_argument("--exec_params",
+                           action="store",
+                           nargs="+",
+                           metavar="PARAM",
+                           help="The options for job execution. Options should"
+                                " be written without the \"--\" prefix")
+
+    args = parser.parse_args()
+
+    # Get id
+    if args.id:
+        cc_id = int(args.id[0])
+    else:
+        if args.create:
+            cc_id = generate_new_id(CassandraCluster.get_cluster_type())
+        else:
+            cc_id = get_default_id(CassandraCluster.get_cluster_type())
+            if not cc_id:
+                logger.error("There is no available cluster. You must create a"
+                             " new one")
+                sys.exit(os.EX_DATAERR)
+
+    logger.info("Using id = " + str(cc_id) + " (CASSANDRA)")
+
+    verbose = True
+    if args.quiet:
+        verbose = False
+
+    # Create or load object
+    if args.create:
+
+        if cluster_exists(CassandraCluster.get_cluster_type(), cc_id):
+            logger.error("There is a Cassandra cluster with that id. You must "
+                         "remove it before or chose another id")
+            sys.exit(os.EX_DATAERR)
+
+        hosts = generate_hosts(args.create[0])
+
+        if args.properties:
+            cc = CassandraCluster(hosts, args.properties[0])
+        else:
+            cc = CassandraCluster(hosts)
+
+    elif args.delete:
+
+        # Clean
+        cc = deserialize_cluster(CassandraCluster.get_cluster_type(), cc_id)
+        if cc.initialized:
+            logger.warn("The cluster needs to be cleaned before removed.")
+            cc.clean()
+
+        # Remove cc dump file
+        logger.info("Removing cc dump file from cluster")
+        remove_cluster(CassandraCluster.get_cluster_type(), cc_id)
+
+        sys.exit(os.EX_OK)
+    else:
+        # Deserialize
+        cc = deserialize_cluster(CassandraCluster.get_cluster_type(), cc_id)
+
+    # Execute options
+    if args.bootstrap:
+        cc.bootstrap(args.bootstrap[0])
+
+    if args.initialize:
+        cc.initialize()
+
+    if args.start:
+        cc.start()
+
+    if args.shell or args.job:
+        node_host = Host(args.node[0]) if args.node else None
+
+        if args.exec_params:
+            exec_params = ["--" + p.replace("=", " ") for p in args.exec_params]
+        else:
+            exec_params = None
+
+        if args.shell:
+            cc.start_shell(node=node_host, exec_params=exec_params)
+        elif args.job:
+            logger.error("Not implemented yet")
+
+    else:
+        if args.node:
+            logger.warn("--node only applies to --job or --shell. Ignoring "
+                        "argument")
+        if args.exec_params:
+            logger.warn("--exec_params only applies to --job or --shell. "
+                        "Ignoring argument")
+
+    if args.stop:
+        cc.stop()
+
+    if args.clean:
+        cc.clean()
+
+    serialize_cluster(CassandraCluster.get_cluster_type(), cc_id, cc)
