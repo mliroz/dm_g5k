@@ -9,9 +9,9 @@ from execo.log import style
 from execo_engine import logger
 
 from dm_g5k.mongodb import MongoDBCluster
-from dm_g5k.util import generate_hosts, generate_new_id, \
-    get_default_id, cluster_exists, deserialize_cluster, remove_cluster, \
-    serialize_cluster
+from dm_g5k.util import generate_hosts
+from dm_g5k.serialization import generate_new_id, get_default_id, \
+    cluster_exists, deserialize_cluster, remove_cluster, serialize_cluster
 
 CLUSTER_TYPE = "mongodb"
 

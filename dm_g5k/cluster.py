@@ -19,6 +19,10 @@ class Cluster(object):
     hosts = []
     master = None
 
+    @staticmethod
+    def get_cluster_type():
+        return "cassandra"
+
     @abstractmethod
     def bootstrap(self, dist_file):
         """Install the software in all cluster nodes from the specified file.

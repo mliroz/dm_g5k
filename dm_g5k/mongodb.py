@@ -43,6 +43,10 @@ class MongoDBCluster(Cluster):
         "local_base_conf_dir": DEFAULT_MONGODB_LOCAL_CONF_DIR
     }
 
+    @staticmethod
+    def get_cluster_type():
+        return "mongodb"
+
     def __init__(self, hosts, config_file=None):
         """Create a new MongoDB cluster with the given hosts.
 
@@ -162,7 +166,7 @@ class MongoDBCluster(Cluster):
         """Copy base configuration files to tmp dir."""
 
         self.temp_conf_dir = tempfile.mkdtemp("", "mongodb-", "/tmp")
-        if os.path.exists(self.local_base_conf_dir):
+        if os.path.get_clists(self.local_base_conf_dir):
             base_conf_files = [os.path.join(self.local_base_conf_dir, f)
                                for f in os.listdir(self.local_base_conf_dir)]
             for f in base_conf_files:
